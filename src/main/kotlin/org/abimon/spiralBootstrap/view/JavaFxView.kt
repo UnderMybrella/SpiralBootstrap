@@ -317,8 +317,76 @@ class JavaFxView : Application() {
     }
 
     fun compile() {
-        if (!modFile.exists())
-            Fuel.download(mod.zipUrl).header("User-Agent" to USER_AGENT).destination { _, _ -> modFile }.response()
+        if (!modFile.exists()) {
+            val (_, headResponse) = Fuel.head(mod.zipUrl).header("User-Agent" to USER_AGENT).response()
+
+            val popup = GridPane()
+            val popupScene: Scene = Scene(popup)
+
+            popup.hgap = 8.0
+            popup.vgap = 8.0
+            popup.padding = Insets(5.0)
+
+            for (i in 0 until 2) {
+                val column = ColumnConstraints()
+                column.hgrow = Priority.ALWAYS
+                popup.columnConstraints.add(column)
+            }
+
+            val dialog: Stage = run {
+                var tmpDialog: Stage? = null
+
+                runOnJavaFX {
+                    tmpDialog = Stage()
+                    tmpDialog?.initModality(Modality.APPLICATION_MODAL)
+                    tmpDialog?.initOwner(primaryStage)
+                }
+
+                return@run tmpDialog!!
+            }
+
+            val downloadSize = headResponse.contentLength.toDouble()
+            val label = Label("Downloading ${mod.name} (${headResponse.contentLength.formatAsBytes()})")
+
+            val progressBar = ProgressBar(0.0)
+            val progressIndicator = ProgressIndicator(-1.0)
+
+            val finishButton = Button("Downloading...")
+            finishButton.disable = true
+
+            GridPane.setHalignment(progressBar, HPos.LEFT)
+            GridPane.setHalignment(finishButton, HPos.LEFT)
+
+            popup.add(label, 0, 0, 2, 1)
+            popup.add(progressBar, 0, 1)
+            popup.add(progressIndicator, 1, 1, 1, 2)
+            popup.add(finishButton, 0, 2)
+
+            runOnJavaFX {
+                dialog.scene = popupScene
+                dialog.show()
+            }
+
+            val timeTaken = measureNanoTime {
+                Fuel.download(mod.zipUrl).header("User-Agent" to USER_AGENT).destination { _, _ -> modFile }.progress { readBytes, totalBytes ->
+                    runOnJavaFX {
+                        progressBar.progress = readBytes.toDouble() / totalBytes.toDouble()
+                        progressIndicator.progress = readBytes.toDouble() / totalBytes.toDouble()
+                    }
+                }.response()
+            }
+
+            println("Downloaded ${mod.zipUrl}; Finished in $timeTaken ns")
+
+            runOnJavaFX {
+                finishButton.disable = false
+                finishButton.text = "Finish"
+            }
+
+            finishButton.waitForAction()
+
+            runOnJavaFX { dialog.close() }
+        }
 
         if (!modFile.exists()) {
             runOnJavaFX {
