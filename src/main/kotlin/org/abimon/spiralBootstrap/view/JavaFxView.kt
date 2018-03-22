@@ -139,7 +139,7 @@ class JavaFxView : Application() {
                                 if (!spiralCompiledLocalisedWad) {
                                     println("Patch WAD -> Localisation WAD -> Not compiled by us")
                                     //The localised wad is all we care about; if it wasn't compiled by us we switch it
-                                    val tmp = File(UUID.randomUUID().toString(), ".wad")
+                                    val tmp = File("${UUID.randomUUID()}.wad")
                                     tmp.deleteOnExit()
 
                                     patchWadFile.renameTo(tmp)
@@ -397,7 +397,8 @@ class JavaFxView : Application() {
             return
         }
 
-        val tmpWad = File.createTempFile(UUID.randomUUID().toString(), ".wad")
+        val tmpWad = File("${UUID.randomUUID()}.wad")
+        tmpWad.deleteOnExit()
         modInstallationFile.renameTo(tmpWad)
 
         val wad = WAD { FileInputStream(tmpWad) }
@@ -412,7 +413,7 @@ class JavaFxView : Application() {
             return
         }
 
-        val introTmp = File.createTempFile(UUID.randomUUID().toString(), ".tga")
+        val introTmp = File("${UUID.randomUUID()}.tga")
         introTmp.deleteOnExit()
 
         try {
