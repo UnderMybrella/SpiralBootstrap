@@ -8,7 +8,10 @@ import kotlinx.coroutines.experimental.DefaultDispatcher
 import kotlinx.coroutines.experimental.Job
 import java.io.File
 import java.io.FileFilter
+import java.io.InputStream
+import java.math.BigInteger
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.experimental.CoroutineContext
@@ -56,3 +59,27 @@ fun Button.waitForAction() {
 
 fun runOnJavaFX(runnable: Runnable) = PlatformImpl.runAndWait(runnable)
 fun runOnJavaFX(block: () -> Unit) = PlatformImpl.runAndWait(block)
+
+inline fun <reified T: Any> longInitialiser(noinline initializer: () -> T): LongProperty<T> = LongProperty(initializer)
+
+fun ByteArray.hash(alg: String): String {
+    val md = MessageDigest.getInstance(alg)
+    val hashBytes = md.digest(this)
+    return String.format("%032x", BigInteger(1, hashBytes))
+}
+
+fun InputStream.hash(alg: String): String {
+    val md = MessageDigest.getInstance("SHA-512")
+
+    val buffer = ByteArray(8192)
+    var read: Int
+    do {
+        read = read(buffer)
+        if (read != -1)
+            md.update(buffer, 0, read)
+    } while (read > 0)
+
+    val hashBytes = md.digest()
+
+    return String.format("%032x", java.math.BigInteger(1, hashBytes))
+}

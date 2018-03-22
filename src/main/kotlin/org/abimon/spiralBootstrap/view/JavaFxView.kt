@@ -1,5 +1,7 @@
 package org.abimon.spiralBootstrap.view
 
+import com.github.kittinunf.fuel.Fuel
+import com.google.gson.JsonParseException
 import javafx.application.Application
 import javafx.application.Platform
 import javafx.geometry.HPos
@@ -16,12 +18,12 @@ import javafx.stage.DirectoryChooser
 import javafx.stage.Modality
 import javafx.stage.Stage
 import org.abimon.spiral.core.objects.archives.WAD
+import org.abimon.spiral.core.objects.customWAD
 import org.abimon.spiral.core.utils.copyWithProgress
 import org.abimon.spiralBootstrap.*
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
+import java.io.*
 import java.util.*
+import java.util.zip.ZipFile
 import kotlin.system.measureNanoTime
 
 
@@ -39,6 +41,10 @@ class JavaFxView : Application() {
 
         val SHA_512_REGEX = "[a-fA-F0-9]{128}".toRegex()
 
+        val LOGO_PATH = "DrCommon/data/all/cg/aglogo.tga"
+        val DEFAULT_LOGO = "75f61bdd4151b707faa72e7c914f22a5a919feaf4b99ee1f4c1b0d7d49fe814ad68982f4a46858fcb19005af5f70fb8476b38d40ed4c7e3fc7cbb51a20b7e691"
+        val USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.13; rv:59.0) Gecko/20100101 Firefox/59.0"
+
         val BYTES = arrayOf(
                 "T" to 1000L * 1000 * 1000 * 1000,
                 "G" to 1000L * 1000 * 1000,
@@ -47,11 +53,15 @@ class JavaFxView : Application() {
         )
     }
 
+    val mod: SpiralMod
+    val modFile: File
+
     val width = 280.0
     val height = 300.0
     val root = GridPane()
     val scene: Scene = Scene(root)
     lateinit var primaryStage: Stage
+    lateinit var modInstallationFile: File
 
     override fun start(primaryStage: Stage) {
         this.primaryStage = primaryStage
@@ -77,7 +87,7 @@ class JavaFxView : Application() {
 //
 //        root.getRowConstraints().add(rcons2)
 
-        val label = Label("SPIRAL Bootstrapper")
+        val label = Label("Installer for \"${mod.name}\"")
         val labelSeparator = Separator()
         val selectInstallDir = Button("Select Installation Directory")
         val install = Button("Install")
@@ -94,9 +104,17 @@ class JavaFxView : Application() {
                             ?: allSubfiles.firstOrNull { file -> file.name == "dr1_$DATA_WAD_NAME" }
 
                     if (dataWadFile != null) {
-                        checkForAndBackup(dataWadFile)
-
                         val game = dataWadFile.name.substringBefore('_')
+                        if (mod.requiredGame != null && mod.requiredGame?.toUpperCase() != game.toUpperCase()) {
+                            runOnJavaFX {
+                                val alert = Alert(AlertType.ERROR, "\"${mod.name}\" requires ${mod.requiredGame?.toUpperCase()}, and you selected ${game.toUpperCase()}.\nPlease select the correct installation.", ButtonType.OK)
+                                alert.showAndWait()
+                            }
+
+                            return@launchCoroutine
+                        }
+
+                        checkForAndBackup(dataWadFile)
                         val patchWadFile = allSubfiles.firstOrNull { file -> file.name == "${game}_$PATCH_WAD_NAME" }
                         val localisedWadFile = allSubfiles.firstOrNull { file -> LOCALISED_WAD_NAMES.any { lang -> file.name == "${game}_$lang" } }
 
@@ -112,20 +130,119 @@ class JavaFxView : Application() {
                                 checkForAndBackup(localisedWadFile)
 
                                 println("Patch WAD -> Localised WAD present at $localisedWadFile")
-                                //We also have a localised wad, so we need to check if we compiled the patch file, and if not switch
+                                //We also have a localised wad, so we need to check if we compiled it, and if not switch
 
-                                val compilerVersionPatch = patchWad.files.firstOrNull { entry -> entry.name == WAD_COMPILER_NAME }
                                 val compilerVersionLocalised = localisedWad.files.firstOrNull { entry -> entry.name == WAD_COMPILER_NAME }
-                                val spiralCompiledPatchWad = compilerVersionPatch?.let { entry -> entry.inputStream.use { stream -> String(stream.readBytes(), Charsets.UTF_8) } }?.matches(SHA_512_REGEX) == true
+
                                 val spiralCompiledLocalisedWad = compilerVersionLocalised?.let { entry -> entry.inputStream.use { stream -> String(stream.readBytes(), Charsets.UTF_8) } }?.matches(SHA_512_REGEX) == true
 
-                                if (spiralCompiledPatchWad) {
-                                    if (!spiralCompiledLocalisedWad) {
+                                if (!spiralCompiledLocalisedWad) {
+                                    println("Patch WAD -> Localisation WAD -> Not compiled by us")
+                                    //The localised wad is all we care about; if it wasn't compiled by us we switch it
+                                    val tmp = File(UUID.randomUUID().toString(), ".wad")
+                                    tmp.deleteOnExit()
 
-                                    }
+                                    patchWadFile.renameTo(tmp)
+                                    localisedWadFile.renameTo(patchWadFile)
+                                    tmp.renameTo(localisedWadFile)
+
+                                    tmp.delete()
                                 }
+
+                                //At this point, we can use the localised wad file as our installation point
+                                println()
+                                modInstallationFile = localisedWadFile
+
+                                runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                             } else {
-                                println("No localised WAD present; we'll probably need a fresh compile")
+                                //If we have a patch wad, but no localised wad, ask the user about whether they have an old game
+
+                                var selectedOption = Optional.empty<ButtonType>()
+                                runOnJavaFX {
+                                    val alert = Alert(AlertType.CONFIRMATION, "No localisation wad could be found (${game}_data_us).\nDo you have an older copy of the game?", ButtonType.YES, ButtonType.NO, ButtonType.CANCEL)
+                                    alert.buttonTypes.sorted()
+                                    selectedOption = alert.showAndWait()
+                                }
+
+                                val option = selectedOption.orElse(ButtonType.CANCEL)
+
+                                when (option) {
+                                    ButtonType.YES -> {
+                                        //The user has an older copy of the game, so we should use the main data wad
+                                        //TODO: Check if older copies can load the patch file
+
+                                        modInstallationFile = dataWadFile
+                                        runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
+                                    }
+                                    ButtonType.NO -> {
+                                        //The user has a current copy of the game, so we should compile and use a localisation wad
+
+                                        val emptyWad = customWAD {
+                                            major = 1
+                                            minor = 1
+
+                                            add(WAD_COMPILER_NAME, Bootstrap.versionBytes.size.toLong()) { ByteArrayInputStream(Bootstrap.versionBytes) }
+                                        }
+
+                                        var languageOptional: Optional<ButtonType> = Optional.empty()
+                                        val englishButton = getButtonForName("US", ButtonBar.ButtonData.OTHER)
+                                        val japaneseButton = getButtonForName("JP", ButtonBar.ButtonData.OTHER)
+                                        val traditionalChineseButton = getButtonForName("CH", ButtonBar.ButtonData.OTHER)
+
+                                        runOnJavaFX {
+                                            val languageAlert = Alert(AlertType.CONFIRMATION, "Please select your language: \n* English (US)\n* Japanese (JP)\n* Traditional Chinese (CH)", englishButton, japaneseButton, traditionalChineseButton)
+                                            languageOptional = languageAlert.showAndWait()
+                                        }
+
+                                        val suffix = languageOptional.map { button ->
+                                            when (button) {
+                                                englishButton -> return@map "us"
+                                                japaneseButton -> return@map "jp"
+                                                traditionalChineseButton -> return@map "ch"
+                                                else -> return@map null
+                                            }
+                                        }.orElse(null) ?: return@launchCoroutine
+
+                                        val resultingFile = File(dataWadFile.parentFile, "${game}_data_$suffix.wad") //TODO: Ask user for language
+                                        FileOutputStream(resultingFile).use(emptyWad::compile)
+
+                                        modInstallationFile = resultingFile
+
+                                        runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
+                                    }
+                                    ButtonType.CANCEL -> return@launchCoroutine
+                                    else -> println("ERR: $option is not a valid button?")
+                                }
+                            }
+                        } else {
+                            //No patch wad means that we're likely new to this installation thing
+
+                            if (localisedWadFile != null) {
+                                //Fortunately, if we have a localised wad file, it's dead easy; rename them and move on
+                                checkForAndBackup(localisedWadFile)
+
+                                localisedWadFile.renameTo(File(localisedWadFile.parent, "${game}_$PATCH_WAD_NAME")) //Same name for both games thank god
+
+                                //Then, we compile a small empty WAD to the localisation file
+                                val emptyWad = customWAD {
+                                    major = 1
+                                    minor = 1
+
+                                    add(WAD_COMPILER_NAME, Bootstrap.versionBytes.size.toLong()) { ByteArrayInputStream(Bootstrap.versionBytes) }
+                                }
+                                FileOutputStream(localisedWadFile).use(emptyWad::compile)
+
+                                modInstallationFile = localisedWadFile
+
+                                runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
+                            } else {
+                                //This is the worst timeline; we have neither a patch wad or a localisation wad.
+                                //It's practically guaranteed that this is an old copy of the game, and it's unknown if that can load a patch wad file
+                                //Therefore, we get to do the clunky load and compile
+                                //TODO: Check if older copies can load the patch file
+
+                                modInstallationFile = dataWadFile
+                                runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                             }
                         }
 
@@ -135,6 +252,47 @@ class JavaFxView : Application() {
                     runOnJavaFX {
                         val alert = Alert(AlertType.ERROR, "The directory you selected does not contain either a DR1 or DR2 installation", ButtonType.OK)
                         alert.showAndWait()
+                    }
+                }
+            }
+        }
+        install.setOnAction { event ->
+            if (!::modInstallationFile.isInitialized) {
+                val alert = Alert(AlertType.WARNING, "You haven't selected a directory to install to")
+                alert.showAndWait()
+
+                return@setOnAction
+            }
+
+            launchCoroutine {
+                val downloadSize = if (modFile.exists()) -1 else run {
+                    val (_, response) = Fuel.head(mod.zipUrl).header("User-Agent" to USER_AGENT).response()
+
+                    return@run response.contentLength
+                }
+
+                runOnJavaFX {
+                    val confirmAlert = Alert(AlertType.CONFIRMATION, buildString {
+                        append("Installing ")
+                        appendln(mod.name)
+
+                        append("To ")
+                        appendln(modInstallationFile.name)
+
+                        if(downloadSize == -1L) {
+                            append("Mod Size (Local): ")
+                            appendln(modFile.length().formatAsBytes())
+                        } else {
+                            append("Mod Size (Download): ")
+                            appendln(downloadSize.formatAsBytes())
+                        }
+                    })
+
+                    val response = confirmAlert.showAndWait()
+                    response.ifPresent { button ->
+                        if (button == ButtonType.OK) {
+                            launchCoroutine { compile() }
+                        }
                     }
                 }
             }
@@ -156,6 +314,144 @@ class JavaFxView : Application() {
         //root.isGridLinesVisible = true
         primaryStage.scene = scene
         primaryStage.show()
+    }
+
+    fun compile() {
+        if (!modFile.exists())
+            Fuel.download(mod.zipUrl).header("User-Agent" to USER_AGENT).destination { _, _ -> modFile }.response()
+
+        if (!modFile.exists()) {
+            runOnJavaFX {
+                val error = Alert(AlertType.ERROR, "No mod file is present, did the download fail?")
+                error.showAndWait()
+            }
+
+            return
+        }
+
+        val tmpWad = File.createTempFile(UUID.randomUUID().toString(), ".wad")
+        modInstallationFile.renameTo(tmpWad)
+
+        val wad = WAD { FileInputStream(tmpWad) }
+        if (wad == null) {
+            tmpWad.renameTo(modInstallationFile)
+
+            runOnJavaFX {
+                val error = Alert(AlertType.ERROR, "${modInstallationFile.name} is not a wad file; something has gone very wrong")
+                error.showAndWait()
+            }
+
+            return
+        }
+
+        val introTmp = File.createTempFile(UUID.randomUUID().toString(), ".tga")
+        introTmp.deleteOnExit()
+
+        try {
+            val zipFile = ZipFile(modFile)
+
+            val custom = customWAD {
+                add(wad) //Base game stuff
+
+                if (LOGO_PATH !in files || files[LOGO_PATH]!!.second().use { stream -> stream.hash("SHA-512") == DEFAULT_LOGO }) {
+                    val spiralIntro = Bootstrap::class.java.getResourceAsStream("/aglogo.tga")
+                    if (spiralIntro != null) {
+                        FileOutputStream(introTmp).use { out -> spiralIntro.use { stream -> stream.copyTo(out) } }
+
+                        add(LOGO_PATH, introTmp) //Compile the SPIRAL logo as a base asset; if the installed mod wants to override it then that's fine
+                        println("Added SPIRAL Logo")
+                    } else {
+                        println("Went to add SPIRAL Logo, but it's not present")
+                    }
+                } else {
+                    println("Custom Logo in use")
+                }
+
+                //Add all the new entries from the mod
+                zipFile.entries().iterator().forEach { entry ->
+                    add(entry.name, entry.size) { zipFile.getInputStream(entry) }
+                }
+
+                add(WAD_COMPILER_NAME, Bootstrap.versionBytes.size.toLong()) { ByteArrayInputStream(Bootstrap.versionBytes) }
+            }
+
+            val popup = GridPane()
+            val popupScene: Scene = Scene(popup, ColorFX.rgb(0, 0, 0, 0.0))
+
+            popup.hgap = 8.0
+            popup.vgap = 8.0
+            popup.padding = Insets(5.0)
+
+            for (i in 0 until 2) {
+                val column = ColumnConstraints()
+                column.hgrow = Priority.ALWAYS
+                popup.columnConstraints.add(column)
+            }
+
+            val dialog: Stage = run {
+                var tmpDialog: Stage? = null
+
+                runOnJavaFX {
+                    tmpDialog = Stage()
+                    tmpDialog?.initModality(Modality.APPLICATION_MODAL)
+                    tmpDialog?.initOwner(primaryStage)
+                }
+
+                return@run tmpDialog!!
+            }
+
+            val numberOfEntries = custom.files.size.toDouble()
+            val label = Label("Installing ${mod.name} (${numberOfEntries.toInt()} entries to compile)")
+
+            val progressBar = ProgressBar(0.0)
+            val progressIndicator = ProgressIndicator(-1.0)
+
+            val finishButton = Button("Compiling...")
+            finishButton.disable = true
+
+            GridPane.setHalignment(progressBar, HPos.LEFT)
+            GridPane.setHalignment(finishButton, HPos.LEFT)
+
+            popup.add(label, 0, 0, 2, 1)
+            popup.add(progressBar, 0, 1)
+            popup.add(progressIndicator, 1, 1, 1, 2)
+            popup.add(finishButton, 0, 2)
+
+            runOnJavaFX {
+                dialog.scene = popupScene
+                dialog.show()
+            }
+
+            val timeTaken = measureNanoTime {
+                FileOutputStream(modInstallationFile).use { outStream ->
+                    custom.compileWithProgress(outStream) { _, index ->
+                        runOnJavaFX {
+                            progressBar.progress = (index + 1).toDouble() / numberOfEntries
+                            progressIndicator.progress = (index + 1).toDouble() / numberOfEntries
+                        }
+                    }
+                }
+            }
+
+            println("Installing to $modInstallationFile; Finished in $timeTaken ns")
+
+            runOnJavaFX {
+                finishButton.disable = false
+                finishButton.text = "Finish"
+            }
+
+            finishButton.waitForAction()
+
+            runOnJavaFX { dialog.close() }
+        } catch (th: Throwable) {
+            th.printStackTrace()
+
+            modInstallationFile.delete()
+            tmpWad.renameTo(modInstallationFile)
+        } finally {
+            introTmp.delete()
+            tmpWad.delete()
+        }
     }
 
     fun selectionTest() {
@@ -282,15 +578,19 @@ class JavaFxView : Application() {
 
                     finishButton.waitForAction()
 
-                    runOnJavaFX {
-                        backupFile.delete()
-                        dialog.close()
-                    }
+                    runOnJavaFX { dialog.close() }
                 }
                 ButtonType.NO -> DO_NOT_BACKUP.add(file.absolutePath)
                 else -> println("ERR: $buttonPressed is not a valid button?")
             }
         }
+    }
+
+    fun getButtonForName(name: String, type: ButtonBar.ButtonData): ButtonType {
+        if(name !in WAD_BUTTON_TYPES)
+            WAD_BUTTON_TYPES[name] = ButtonType(name, type)
+
+        return WAD_BUTTON_TYPES[name]!!
     }
 
     fun Long.formatAsBytes(): String {
@@ -301,5 +601,31 @@ class JavaFxView : Application() {
         }
 
         return "$this B"
+    }
+
+    init {
+        try {
+            val stream = Bootstrap::class.java.getResourceAsStream("/mod.json")
+            if (stream == null) {
+                val alert = Alert(AlertType.ERROR, "No mod config file found!")
+                alert.showAndWait()
+
+                System.err.println("No mod config file")
+            }
+
+            mod = InputStreamReader(stream).use { reader -> Bootstrap.gson.fromJson(reader, SpiralMod::class.java) }
+            modFile = File("SPIRAL Mod - ${mod.name} v${mod.version}.zip")
+        } catch (parse: JsonParseException) {
+            val baos = ByteArrayOutputStream()
+            val stream = PrintStream(baos)
+            parse.printStackTrace(stream)
+
+            val stackTrace = String(baos.toByteArray())
+
+            val alert = Alert(AlertType.ERROR, stackTrace)
+            alert.showAndWait()
+
+            error(stackTrace)
+        }
     }
 }
