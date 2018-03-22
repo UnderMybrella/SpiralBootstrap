@@ -50,7 +50,7 @@ class JavaFxView : Application() {
     val width = 280.0
     val height = 300.0
     val root = GridPane()
-    val scene: Scene = Scene(root, ColorFX.rgb(0, 0, 0, 0.0))
+    val scene: Scene = Scene(root)
     lateinit var primaryStage: Stage
 
     override fun start(primaryStage: Stage) {
@@ -86,7 +86,7 @@ class JavaFxView : Application() {
 
         selectInstallDir.setOnAction { event ->
             val selector = DirectoryChooser()
-            val selectedDir = selector.showDialog(null)
+            val selectedDir = selector.showDialog(scene.window)
             launchCoroutine {
                 if (selectedDir != null) {
                     val allSubfiles = selectedDir.iterate()
