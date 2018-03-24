@@ -31,8 +31,10 @@ class JavaFxView : Application() {
     companion object {
         val DATA_WAD_NAME = "data.wad"
         val PATCH_WAD_NAME = "patch.wad"
+        val KEYBOARD_WAD_NAME = "data_keyboard.wad"
 
         val LOCALISED_WAD_NAMES = arrayOf("data_us.wad", "data_ch.wad", "data_jp.wad")
+        val LOCALISED_KEYBOARD_WAD_NAMES = arrayOf("data_keyboard_us.wad", "data_keyboard_ch.wad", "data_keyboard_jp.wad")
 
         val WAD_COMPILER_NAME = "wad_compiler.txt"
 
@@ -62,6 +64,9 @@ class JavaFxView : Application() {
     val scene: Scene = Scene(root)
     lateinit var primaryStage: Stage
     lateinit var modInstallationFile: File
+
+    var modKeyboardFile: File? = null
+    var modKeyboardLocalisationFile: File? = null
 
     override fun start(primaryStage: Stage) {
         this.primaryStage = primaryStage
@@ -115,11 +120,23 @@ class JavaFxView : Application() {
                         }
 
                         checkForAndBackup(dataWadFile)
+
+                        //TODO: Change how localised files are detected, because this will break if there are different language wads
                         val patchWadFile = allSubfiles.firstOrNull { file -> file.name == "${game}_$PATCH_WAD_NAME" }
                         val localisedWadFile = allSubfiles.firstOrNull { file -> LOCALISED_WAD_NAMES.any { lang -> file.name == "${game}_$lang" } }
 
+                        val keyboardWadFile = allSubfiles.firstOrNull { file -> file.name == "${game}_$KEYBOARD_WAD_NAME" }
+                        val localisedKeyboardWadFile = allSubfiles.firstOrNull { file -> LOCALISED_KEYBOARD_WAD_NAMES.any { lang -> file.name == "${game}_$lang" } }
+
                         val patchWad = patchWadFile?.let { file -> WAD { FileInputStream(file) } }
                         val localisedWad = localisedWadFile?.let { file -> WAD { FileInputStream(file) } }
+
+                        if (keyboardWadFile != null)
+                            checkForAndBackup(keyboardWadFile)
+
+                        if (localisedKeyboardWadFile != null)
+                            checkForAndBackup(localisedKeyboardWadFile)
+
                         if (patchWad != null) {
                             checkForAndBackup(patchWadFile)
 
@@ -152,6 +169,8 @@ class JavaFxView : Application() {
                                 //At this point, we can use the localised wad file as our installation point
                                 println()
                                 modInstallationFile = localisedWadFile
+                                modKeyboardFile = keyboardWadFile
+                                modKeyboardLocalisationFile = localisedKeyboardWadFile
 
                                 runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                             } else {
@@ -172,6 +191,8 @@ class JavaFxView : Application() {
                                         //TODO: Check if older copies can load the patch file
 
                                         modInstallationFile = dataWadFile
+                                        modKeyboardFile = keyboardWadFile
+                                        modKeyboardLocalisationFile = localisedKeyboardWadFile
                                         runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                                     }
                                     ButtonType.NO -> {
@@ -207,6 +228,8 @@ class JavaFxView : Application() {
                                         FileOutputStream(resultingFile).use(emptyWad::compile)
 
                                         modInstallationFile = resultingFile
+                                        modKeyboardFile = keyboardWadFile
+                                        modKeyboardLocalisationFile = localisedKeyboardWadFile
 
                                         runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                                     }
@@ -233,6 +256,8 @@ class JavaFxView : Application() {
                                 FileOutputStream(localisedWadFile).use(emptyWad::compile)
 
                                 modInstallationFile = localisedWadFile
+                                modKeyboardFile = keyboardWadFile
+                                modKeyboardLocalisationFile = localisedKeyboardWadFile
 
                                 runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                             } else {
@@ -242,6 +267,8 @@ class JavaFxView : Application() {
                                 //TODO: Check if older copies can load the patch file
 
                                 modInstallationFile = dataWadFile
+                                modKeyboardFile = keyboardWadFile
+                                modKeyboardLocalisationFile = localisedKeyboardWadFile
                                 runOnJavaFX { Alert(AlertType.INFORMATION, "Installation directory set").showAndWait() }
                             }
                         }
@@ -413,11 +440,24 @@ class JavaFxView : Application() {
             return
         }
 
+        val tmpKeyboardWad = modKeyboardFile?.let { File("${UUID.randomUUID()}.wad") }
+        tmpKeyboardWad?.deleteOnExit()
+        modKeyboardFile?.renameTo(tmpKeyboardWad)
+
+        val keyboardWad = tmpKeyboardWad?.let { file -> WAD { FileInputStream(file) } }
+
+        val tmpKeyboardLocalisedWad = modKeyboardLocalisationFile?.let { File("${UUID.randomUUID()}.wad") }
+        tmpKeyboardLocalisedWad?.deleteOnExit()
+        modKeyboardLocalisationFile?.renameTo(tmpKeyboardLocalisedWad)
+
+        val localisedKeyboardWad = tmpKeyboardLocalisedWad?.let { file -> WAD { FileInputStream(file) } }
+
         val introTmp = File("${UUID.randomUUID()}.tga")
         introTmp.deleteOnExit()
 
         try {
             val zipFile = ZipFile(modFile)
+            val entries = zipFile.entries().toList()
 
             val custom = customWAD {
                 add(wad) //Base game stuff
@@ -437,11 +477,40 @@ class JavaFxView : Application() {
                 }
 
                 //Add all the new entries from the mod
-                zipFile.entries().iterator().forEach { entry ->
+                entries.forEach { entry ->
                     add(entry.name, entry.size) { zipFile.getInputStream(entry) }
                 }
 
                 add(WAD_COMPILER_NAME, Bootstrap.versionBytes.size.toLong()) { ByteArrayInputStream(Bootstrap.versionBytes) }
+            }
+
+            val customKeyboardWad = keyboardWad?.let { kbWad ->
+                if (entries.none { entry -> kbWad.files.any { kbEntry -> kbEntry.name == entry.name } })
+                    return@let null
+
+                customWAD {
+                    add(kbWad)
+
+                    // *ONLY* add entries that are already there
+                    entries.forEach { entry ->
+                        if(entry.name in files)
+                            add(entry.name, entry.size) { zipFile.getInputStream(entry) }
+                    }
+                }
+            }
+
+            val customLocalisedKeyboardWad = localisedKeyboardWad?.let { kbWad ->
+                if (entries.none { entry -> kbWad.files.any { kbEntry -> kbEntry.name == entry.name } })
+                    return@let null
+
+                customWAD {
+                    add(kbWad)
+
+                    entries.forEach { entry ->
+                        if(entry.name in files)
+                            add(entry.name, entry.size) { zipFile.getInputStream(entry) }
+                    }
+                }
             }
 
             val popup = GridPane()
@@ -469,8 +538,11 @@ class JavaFxView : Application() {
                 return@run tmpDialog!!
             }
 
-            val numberOfEntries = custom.files.size.toDouble()
-            val label = Label("Installing ${mod.name} (${numberOfEntries.toInt()} entries to compile)")
+            val numberOfWadEntries = custom.files.size.toDouble()
+            val numberOfKeyboardEntries = customKeyboardWad?.files?.size?.toDouble() ?: 0.0
+            val numberOfLocalisedKeyboardEntries = customLocalisedKeyboardWad?.files?.size?.toDouble() ?: 0.0
+            val numberOfEntriesTotal =  + (customKeyboardWad?.files?.size?.toDouble() ?: 0.0) + (customLocalisedKeyboardWad?.files?.size?.toDouble() ?: 0.0)
+            val label = Label("Installing ${mod.name} (${numberOfEntriesTotal.toInt()} entries to compile)")
 
             val progressBar = ProgressBar(0.0)
             val progressIndicator = ProgressIndicator(-1.0)
@@ -495,8 +567,30 @@ class JavaFxView : Application() {
                 FileOutputStream(modInstallationFile).use { outStream ->
                     custom.compileWithProgress(outStream) { _, index ->
                         runOnJavaFX {
-                            progressBar.progress = (index + 1).toDouble() / numberOfEntries
-                            progressIndicator.progress = (index + 1).toDouble() / numberOfEntries
+                            progressBar.progress = (index + 1).toDouble() / numberOfEntriesTotal
+                            progressIndicator.progress = (index + 1).toDouble() / numberOfEntriesTotal
+                        }
+                    }
+                }
+
+                if (customKeyboardWad != null) {
+                    FileOutputStream(modKeyboardFile).use { outStream ->
+                        customKeyboardWad.compileWithProgress(outStream) { _, index ->
+                            runOnJavaFX {
+                                progressBar.progress = (index + 1 + numberOfWadEntries) / numberOfEntriesTotal
+                                progressIndicator.progress = (index + 1 + numberOfWadEntries) / numberOfEntriesTotal
+                            }
+                        }
+                    }
+                }
+
+                if (customLocalisedKeyboardWad != null) {
+                    FileOutputStream(modKeyboardLocalisationFile).use { outStream ->
+                        customLocalisedKeyboardWad.compileWithProgress(outStream) { _, index ->
+                            runOnJavaFX {
+                                progressBar.progress = (index + 1 + numberOfWadEntries + numberOfKeyboardEntries) / numberOfEntriesTotal
+                                progressIndicator.progress = (index + 1 + numberOfWadEntries + numberOfKeyboardEntries) / numberOfEntriesTotal
+                            }
                         }
                     }
                 }
@@ -517,9 +611,25 @@ class JavaFxView : Application() {
 
             modInstallationFile.delete()
             tmpWad.renameTo(modInstallationFile)
+
+            modKeyboardFile?.delete()
+            tmpKeyboardWad?.renameTo(modKeyboardFile)
+
+            modKeyboardLocalisationFile?.delete()
+            tmpKeyboardLocalisedWad?.renameTo(modKeyboardLocalisationFile)
+
+            runOnJavaFX {
+                val errorLog = File("Error-${System.currentTimeMillis()}.log")
+                PrintStream(errorLog).use(th::printStackTrace)
+
+                val error = Alert(AlertType.ERROR, "An error has occured and the installation has been cancelled.\nAn error log has been written to $errorLog, please report this to UnderMybrella")
+                error.showAndWait()
+            }
         } finally {
             introTmp.delete()
             tmpWad.delete()
+            tmpKeyboardWad?.delete()
+            tmpKeyboardLocalisedWad?.delete()
         }
     }
 
